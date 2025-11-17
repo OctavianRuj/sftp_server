@@ -5,7 +5,7 @@ import hashlib
 import pytest
 
 # Import your functions from authenticate.py
-from sftp_server.server.auth import (
+from server.auth import (
     scrypt_hash, verify_password, SCRYPT_N, SCRYPT_R, SCRYPT_P, DKLEN
 )
 def _mk_hash(password: str, *, n=SCRYPT_N, r=SCRYPT_R, p=SCRYPT_P, dklen=DKLEN):

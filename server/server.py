@@ -16,7 +16,8 @@ from pathlib import Path
 
 import asyncssh
 
-from policy import authorize  # unified DAC+MAC+RBAC gate: authorize(user, op, path)
+# Use a package-relative import so the module works when imported as `server.server`
+from .policy import authorize  # unified DAC+MAC+RBAC gate: authorize(user, op, path)
 
 
 # === SFTP v3 constants (only the ones we actually need) ===
@@ -251,6 +252,8 @@ class SFTPServerSession(asyncssh.SSHServerSession):
                     await self._handle_readdir(pkt)
                 elif msg_type == SSH_FXP_OPEN:
                     await self._handle_open(pkt)
+                elif msg_type == SSH_FXP_READ:
+                    await self._handle_read(pkt)
                 elif msg_type == SSH_FXP_CLOSE:
                     await self._handle_close(pkt)
                 else:
@@ -558,6 +561,53 @@ class SFTPServerSession(asyncssh.SSHServerSession):
         handle_id = self._handles.create_file_handle(full_path, f)
         payload = bytes([SSH_FXP_HANDLE]) + pack_uint32(request_id)
         payload += pack_string(handle_id.decode("latin-1", errors="ignore"))
+        await self._send_packet(payload)
+
+    async def _handle_read(self, pkt: bytes):
+        """
+        READ:
+
+        Packet format (payload after msg type):
+        [id:uint32][handle:string][offset:uint64][len:uint32]
+
+        Reply with DATA (one or more) or STATUS(EOF).
+        """
+        request_id = struct.unpack_from(">I", pkt, 1)[0]
+        offset = 5
+        handle, offset = unpack_string(pkt, offset)
+        # offset is uint64
+        read_offset = struct.unpack_from(">Q", pkt, offset)[0]
+        offset += 8
+        read_len, _ = unpack_uint32(pkt, offset)
+
+        handle_id = handle.encode("latin-1", errors="ignore")
+        entry = self._handles.get(handle_id)
+        if not entry or entry.kind != "file":
+            await self._send_status(request_id, SSH_FX_FAILURE, "invalid file handle")
+            return
+
+        full_path = entry.path
+        allowed, reason = authorize(self._username, "read", str(full_path))
+        if not allowed:
+            await self._send_status(request_id, SSH_FX_PERMISSION_DENIED, reason)
+            return
+
+        try:
+            fobj = entry.obj
+            fobj.seek(read_offset)
+            data = fobj.read(read_len)
+        except OSError as e:
+            await self._send_status(request_id, SSH_FX_FAILURE, str(e))
+            return
+
+        if not data:
+            # EOF
+            await self._send_status(request_id, SSH_FX_EOF, "EOF")
+            return
+
+        payload = bytes([SSH_FXP_DATA]) + pack_uint32(request_id)
+        payload += pack_uint32(len(data))
+        payload += data
         await self._send_packet(payload)
 
     async def _handle_close(self, pkt: bytes):
