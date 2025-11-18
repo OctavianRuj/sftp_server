@@ -230,11 +230,23 @@ class SFTPServerSession(asyncssh.SSHServerSession):
         self._jail_root = jail_root
         self._handles = HandleTable()
         self._loop_task = None
+        self._buffer = bytearray()
+        self._packet_ready = asyncio.Event()
 
     def connection_made(self, chan):
         # store channel so we can read/write later
         self._chan = chan
         print(f"[SFTP] Connection made for user: {self._username}")
+    
+    def data_received(self, data, datatype=None):
+        """Called when data is received from the client."""
+        self._buffer.extend(data)
+        self._packet_ready.set()
+
+    def subsystem_requested(self, subsystem):
+        """Handle subsystem requests - we only support 'sftp'."""
+        print(f"[SFTP] Subsystem requested: {subsystem}")
+        return subsystem == 'sftp'
 
     def session_started(self):
         # kick off the SFTP loop (async)
@@ -305,19 +317,32 @@ class SFTPServerSession(asyncssh.SSHServerSession):
 
     async def _read_packet(self) -> bytes | None:
         """
-        Read one SFTP packet from the channel.
+        Read one SFTP packet from the buffer.
 
         Format:
         - 4 bytes length (big endian)
         - [length] bytes payload
         """
-        header = await self._chan.readexactly(4)
-        if not header:
-            return None
-        (length,) = struct.unpack(">I", header)
-        payload = await self._chan.readexactly(length)
-        if not payload:
-            return None
+        # Wait until we have at least the length header (4 bytes)
+        while len(self._buffer) < 4:
+            self._packet_ready.clear()
+            await self._packet_ready.wait()
+        
+        # Read length
+        (length,) = struct.unpack(">I", self._buffer[:4])
+        
+        # Wait until we have the full packet
+        total_needed = 4 + length
+        while len(self._buffer) < total_needed:
+            self._packet_ready.clear()
+            await self._packet_ready.wait()
+        
+        # Extract the packet payload (without length prefix)
+        payload = bytes(self._buffer[4:total_needed])
+        
+        # Remove consumed data from buffer
+        del self._buffer[:total_needed]
+        
         return payload
 
     async def _send_packet(self, payload: bytes):
@@ -817,6 +842,12 @@ class SFTPSSHServer(asyncssh.SSHServer):
     def __init__(self, jail_root: Path):
         super().__init__()
         self._jail_root = jail_root
+        self._conn = None
+
+    def connection_made(self, conn):
+        """Called when a new connection is made."""
+        self._conn = conn
+        print(f"[Server] Connection made from {conn.get_extra_info('peername')}")
 
     def begin_auth(self, username):
         # we return True to say "yes, we want to do auth" (asyncssh handles details)
@@ -864,16 +895,13 @@ class SFTPSSHServer(asyncssh.SSHServer):
             return False
 
     def session_requested(self):
-        # SFTP is handled via subsystem, not direct session
-        return True
-    
-    def subsystem_requested(self, subsystem):
-        """Handle SFTP subsystem requests."""
-        print(f"[Server] subsystem_requested: {subsystem}")
-        if subsystem == 'sftp':
-            return SFTPServerSession(username=self._conn.get_extra_info("username"),
-                                     jail_root=self._jail_root)
-        return False
+        """
+        Called when a session channel open is requested.
+        Return a session handler (our SFTP session).
+        """
+        username = self._conn.get_extra_info("username")
+        print(f"[Server] session_requested for user: {username}")
+        return SFTPServerSession(username=username, jail_root=self._jail_root)
     
     def server_requested(self, listen_host, listen_port):
         """Handle server requests."""
