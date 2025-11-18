@@ -3,7 +3,13 @@ admin,model.pkl,read,write,delete
 admin,audit.log,read,write
 admin,report.csv,read,write,delete
 admin,secret_storage/flag.txt,read
+admin,*,read,write
 analyst,model.pkl,read,write
 analyst,audit.log,read
 analyst,report.csv,read,write
+analyst,projects/*,read,write
+analyst,internal/*,read,write
+analyst,hello.txt,read
+analyst,somedir/*,read
 intern,report.csv,read
+intern,public/*,read

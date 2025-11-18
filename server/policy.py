@@ -18,7 +18,7 @@ import csv
 import json
 import os
 import stat
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -109,7 +109,7 @@ def get_user(username: str) -> Optional[Dict]:
 def _audit_record(user: str, op: str, path: str, allowed: bool, reason: str) -> None:
     """Write an audit record to audit.jsonl."""
     rec = {
-        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "user": user,
         "op": op,
         "path": path,
@@ -301,7 +301,12 @@ def _check_rbac(user: str, op: str, path: str) -> Tuple[bool, str]:
     for role in user_roles:
         role_permissions = _role_perms.get(role, {})
         
-        # Check exact match first
+        # Check wildcard match first (most permissive)
+        if '*' in role_permissions:
+            if required_perm in role_permissions['*']:
+                return True, f"RBAC: role '{role}' grants {required_perm} on wildcard '*'"
+        
+        # Check exact match
         if resource_path in role_permissions:
             if required_perm in role_permissions[resource_path]:
                 return True, f"RBAC: role '{role}' grants {required_perm} on '{resource_path}'"
@@ -313,7 +318,7 @@ def _check_rbac(user: str, op: str, path: str) -> Tuple[bool, str]:
                 if resource_path.startswith(prefix):
                     if required_perm in perms:
                         return True, f"RBAC: role '{role}' grants {required_perm} on prefix '{prefix}/*'"
-            elif '/' in resource_path and resource in resource_path:
+            elif resource != '*' and '/' in resource_path and resource in resource_path:
                 # Resource partial match
                 if required_perm in perms:
                     return True, f"RBAC: role '{role}' grants {required_perm} on '{resource}' (matched in path)"
