@@ -1,5 +1,11 @@
 {
-    "alice": ["admin"],
-    "bob": ["analyst"],
-    "eve": ["intern"]
-    }
+  "alice": [
+    "admin"
+  ],
+  "bob": [
+    "user"
+  ],
+  "eve": [
+    "guest"
+  ]
+}

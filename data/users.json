@@ -1,29 +1,23 @@
 [
   {
     "username": "alice",
-    "salt": "dHByt2s9RtBmxNCoPzQBzw==",
-    "password_hash": "20+1TiPnSHr4tKBBsLPlwNE/3e2/ZISeAVolnJQ084E=",
-    "n": 16384,
-    "r": 8,
-    "p": 1,
-    "dklen": 32
+    "salt": "hMglKyGGcztW6yriZ/J6Ig==",
+    "password_hash": "Zv+CrlZ4gSdqAQ8MPdbQvOaFHD+DyXesqwrRsdJmf00=",
+    "algo": "pbkdf2_sha256",
+    "iterations": 100000
   },
   {
     "username": "bob",
-    "salt": "j7ALxqBCCFLuzwfpeVZUlA==",
-    "password_hash": "0/5Ml8WZchlruJ241XO5uyXtJNQC/+5Tm4p306JdMLg=",
-    "n": 16384,
-    "r": 8,
-    "p": 1,
-    "dklen": 32
+    "salt": "I8yZnNNj5wH7/Rgkr9AXyw==",
+    "password_hash": "Rl51oWXF35kMPMDJsRS4ho4FC/jZFG7zv13OPow39jQ=",
+    "algo": "pbkdf2_sha256",
+    "iterations": 100000
   },
   {
     "username": "eve",
-    "salt": "YJmxXqN23neGurWKxGpN/A==",
-    "password_hash": "ga6mBPwxugTtmMzsOUqs3YL8hLda/X3q0+Q+th0gt4A=",
-    "n": 16384,
-    "r": 8,
-    "p": 1,
-    "dklen": 32
+    "salt": "BK+FYx8IAQ1x4yXNbcTEWQ==",
+    "password_hash": "naJj6CSDy1H+N/FNpQQy38B8vKh1BEXSSrt7Y7Z1LX4=",
+    "algo": "pbkdf2_sha256",
+    "iterations": 100000
   }
 ]

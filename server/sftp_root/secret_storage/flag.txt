@@ -1,1 +1,0 @@
-FLAG{access_control_is_not_optional_123}
