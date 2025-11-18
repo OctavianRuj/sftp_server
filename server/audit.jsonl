@@ -20,3 +20,13 @@
 {"timestamp": "2025-11-18T18:05:32.006824Z", "user": "alice", "op": "read", "path": "/test.txt", "allowed": false, "reason": "RBAC: no role grants read permission for 'test.txt'"}
 {"timestamp": "2025-11-18T18:05:32.020309Z", "user": "bob", "op": "realpath", "path": "/hello.txt", "allowed": false, "reason": "RBAC: no role grants read permission for 'hello.txt'"}
 {"timestamp": "2025-11-18T18:05:32.148498Z", "user": "bob", "op": "list", "path": "/somedir", "allowed": false, "reason": "RBAC: no role grants read permission for 'somedir'"}
+{"timestamp": "2025-11-18T18:11:22.186066Z", "user": "alice", "op": "read", "path": "/secret_storage/flag.txt", "allowed": true, "reason": "Allowed: DAC: owner read allowed; MAC: read allowed (user=confidential, resource=confidential); RBAC: role 'admin' grants read on 'secret_storage/flag.txt'"}
+{"timestamp": "2025-11-18T18:11:22.186961Z", "user": "bob", "op": "read", "path": "/secret_storage/flag.txt", "allowed": false, "reason": "DAC: other lacks r permission (mode=0700)"}
+{"timestamp": "2025-11-18T18:11:22.187701Z", "user": "eve", "op": "read", "path": "/secret_storage/flag.txt", "allowed": false, "reason": "DAC: other lacks r permission (mode=0700)"}
+{"timestamp": "2025-11-18T18:11:22.189205Z", "user": "alice", "op": "read", "path": "/test.txt", "allowed": false, "reason": "RBAC: no role grants read permission for 'test.txt'"}
+{"timestamp": "2025-11-18T18:11:31.022224Z", "user": "alice", "op": "read", "path": "/secret_storage/flag.txt", "allowed": true, "reason": "Allowed: DAC: owner read allowed; MAC: read allowed (user=confidential, resource=confidential); RBAC: role 'admin' grants read on 'secret_storage/flag.txt'"}
+{"timestamp": "2025-11-18T18:11:31.023245Z", "user": "bob", "op": "read", "path": "/secret_storage/flag.txt", "allowed": false, "reason": "DAC: other lacks r permission (mode=0700)"}
+{"timestamp": "2025-11-18T18:11:31.024049Z", "user": "eve", "op": "read", "path": "/secret_storage/flag.txt", "allowed": false, "reason": "DAC: other lacks r permission (mode=0700)"}
+{"timestamp": "2025-11-18T18:11:31.025623Z", "user": "alice", "op": "read", "path": "/test.txt", "allowed": false, "reason": "RBAC: no role grants read permission for 'test.txt'"}
+{"timestamp": "2025-11-18T18:11:31.028489Z", "user": "bob", "op": "realpath", "path": "/hello.txt", "allowed": false, "reason": "RBAC: no role grants read permission for 'hello.txt'"}
+{"timestamp": "2025-11-18T18:11:31.120656Z", "user": "bob", "op": "list", "path": "/somedir", "allowed": false, "reason": "RBAC: no role grants read permission for 'somedir'"}
