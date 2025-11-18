@@ -35,6 +35,7 @@ SSH_FXP_SETSTAT = 9
 SSH_FXP_FSETSTAT = 10
 SSH_FXP_OPENDIR = 11
 SSH_FXP_READDIR = 12
+SSH_FXP_MKDIR = 14
 SSH_FXP_STAT = 17
 SSH_FXP_REALPATH = 16
 SSH_FXP_STATUS = 101
@@ -250,10 +251,14 @@ class SFTPServerSession(asyncssh.SSHServerSession):
                     await self._handle_opendir(pkt)
                 elif msg_type == SSH_FXP_READDIR:
                     await self._handle_readdir(pkt)
+                elif msg_type == SSH_FXP_MKDIR:
+                    await self._handle_mkdir(pkt)
                 elif msg_type == SSH_FXP_OPEN:
                     await self._handle_open(pkt)
                 elif msg_type == SSH_FXP_READ:
                     await self._handle_read(pkt)
+                elif msg_type == SSH_FXP_WRITE:
+                    await self._handle_write(pkt)
                 elif msg_type == SSH_FXP_CLOSE:
                     await self._handle_close(pkt)
                 else:
@@ -471,6 +476,40 @@ class SFTPServerSession(asyncssh.SSHServerSession):
         payload += pack_string(handle_id.decode("latin-1", errors="ignore"))
         await self._send_packet(payload)
 
+    async def _handle_mkdir(self, pkt: bytes):
+        """
+        MKDIR:
+        [id:uint32][path:string]
+        """
+        request_id = struct.unpack_from(">I", pkt, 1)[0]
+        _, offset = unpack_uint32(pkt, 1)
+        path, _ = unpack_string(pkt, offset)
+
+        try:
+            full_path = safe_join(self._jail_root, path)
+        except ValueError:
+            await self._send_status(request_id, SSH_FX_PERMISSION_DENIED, "path escapes jail")
+            return
+
+        allowed, reason = authorize(self._username, "mkdir", str(full_path))
+        if not allowed:
+            await self._send_status(request_id, SSH_FX_PERMISSION_DENIED, reason)
+            return
+
+        try:
+            full_path.mkdir()
+        except FileExistsError:
+            await self._send_status(request_id, SSH_FX_FAILURE, "directory exists")
+            return
+        except PermissionError:
+            await self._send_status(request_id, SSH_FX_PERMISSION_DENIED, "permission denied")
+            return
+        except OSError as e:
+            await self._send_status(request_id, SSH_FX_FAILURE, str(e))
+            return
+
+        await self._send_status(request_id, SSH_FX_OK, "")
+
     async def _handle_readdir(self, pkt: bytes):
         """
         READDIR:
@@ -528,10 +567,13 @@ class SFTPServerSession(asyncssh.SSHServerSession):
         path, offset = unpack_string(pkt, offset)
         pflags, offset = unpack_uint32(pkt, offset)
 
-        # Only allow pure read. If any write/append/creat flags are set -> nope.
-        allowed_flags = SSH_FXF_READ
-        if pflags & ~allowed_flags:
-            await self._send_status(request_id, SSH_FX_PERMISSION_DENIED, "write not allowed")
+        # Decide whether this is a read or write open
+        is_read = (pflags & SSH_FXF_READ) != 0 and (pflags & (SSH_FXF_WRITE | SSH_FXF_CREAT | SSH_FXF_TRUNC | SSH_FXF_EXCL | SSH_FXF_APPEND)) == 0
+        is_write = (pflags & (SSH_FXF_WRITE | SSH_FXF_CREAT | SSH_FXF_TRUNC | SSH_FXF_EXCL | SSH_FXF_APPEND)) != 0
+
+        if not (is_read or is_write):
+            # Nothing meaningful requested
+            await self._send_status(request_id, SSH_FX_FAILURE, "unsupported open flags")
             return
 
         try:
@@ -540,17 +582,49 @@ class SFTPServerSession(asyncssh.SSHServerSession):
             await self._send_status(request_id, SSH_FX_PERMISSION_DENIED, "path escapes jail")
             return
 
-        allowed, reason = authorize(self._username, "read", str(full_path))
+        if is_read:
+            allowed, reason = authorize(self._username, "read", str(full_path))
+        else:
+            allowed, reason = authorize(self._username, "write", str(full_path))
         if not allowed:
             await self._send_status(request_id, SSH_FX_PERMISSION_DENIED, reason)
             return
 
-        if not full_path.exists() or not full_path.is_file():
-            await self._send_status(request_id, SSH_FX_NO_SUCH_FILE, "no such file")
-            return
-
+        # File opening semantics for read vs write
         try:
-            f = open(full_path, "rb")
+            if is_read:
+                if not full_path.exists() or not full_path.is_file():
+                    await self._send_status(request_id, SSH_FX_NO_SUCH_FILE, "no such file")
+                    return
+                f = open(full_path, "rb")
+            else:
+                # write/open semantics: respect CREAT, TRUNC, EXCL, APPEND
+                exists = full_path.exists()
+                if (pflags & SSH_FXF_CREAT) and (pflags & SSH_FXF_EXCL) and exists:
+                    await self._send_status(request_id, SSH_FX_FAILURE, "file exists (EXCL)")
+                    return
+
+                if pflags & SSH_FXF_TRUNC:
+                    # truncate or create
+                    f = open(full_path, "w+b")
+                else:
+                    # open for read/write without truncation; create if requested
+                    if exists:
+                        f = open(full_path, "r+b")
+                    else:
+                        if pflags & SSH_FXF_CREAT:
+                            f = open(full_path, "w+b")
+                        else:
+                            await self._send_status(request_id, SSH_FX_NO_SUCH_FILE, "no such file")
+                            return
+
+                # mark append behavior on file object if requested
+                if pflags & SSH_FXF_APPEND:
+                    try:
+                        setattr(f, "_sftp_append", True)
+                    except Exception:
+                        pass
+
         except PermissionError:
             await self._send_status(request_id, SSH_FX_PERMISSION_DENIED, "permission denied")
             return
@@ -609,6 +683,54 @@ class SFTPServerSession(asyncssh.SSHServerSession):
         payload += pack_uint32(len(data))
         payload += data
         await self._send_packet(payload)
+
+    async def _handle_write(self, pkt: bytes):
+        """
+        WRITE:
+
+        Packet format:
+        [id:uint32][handle:string][offset:uint64][data:string]
+        where data is length-prefixed raw bytes.
+        """
+        request_id = struct.unpack_from(">I", pkt, 1)[0]
+        offset = 5
+        handle, offset = unpack_string(pkt, offset)
+        handle_id = handle.encode("latin-1", errors="ignore")
+
+        entry = self._handles.get(handle_id)
+        if not entry or entry.kind != "file":
+            await self._send_status(request_id, SSH_FX_FAILURE, "invalid file handle")
+            return
+
+        # parse offset uint64
+        write_offset = struct.unpack_from(">Q", pkt, offset)[0]
+        offset += 8
+
+        # parse data length and raw bytes
+        data_len, offset = unpack_uint32(pkt, offset)
+        data = pkt[offset : offset + data_len]
+
+        full_path = entry.path
+        allowed, reason = authorize(self._username, "write", str(full_path))
+        if not allowed:
+            await self._send_status(request_id, SSH_FX_PERMISSION_DENIED, reason)
+            return
+
+        fobj = entry.obj
+        try:
+            if getattr(fobj, "_sftp_append", False):
+                # ignore requested offset and write at end
+                fobj.seek(0, os.SEEK_END)
+            else:
+                fobj.seek(write_offset)
+
+            fobj.write(data)
+            fobj.flush()
+        except OSError as e:
+            await self._send_status(request_id, SSH_FX_FAILURE, str(e))
+            return
+
+        await self._send_status(request_id, SSH_FX_OK, "")
 
     async def _handle_close(self, pkt: bytes):
         """
