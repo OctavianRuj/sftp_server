@@ -1,0 +1,20 @@
+{
+    "labels": {
+        "public": 0,
+        "internal": 1,
+        "confidential": 2
+    },
+    "user_clearances": {
+        "alice": "confidential",
+        "bob": "internal",
+        "eve": "public"
+    },
+    "path_labels": {
+        "/public": "public",
+        "/internal": "internal",
+        "/confidential": "confidential",
+        "/secret_storage": "confidential",
+        "/projects": "internal",
+        "/admin": "confidential"
+    }
+}

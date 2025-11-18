@@ -16,8 +16,8 @@ from pathlib import Path
 
 import asyncssh
 
-# Use a package-relative import so the module works when imported as `server.server`
-from .policy import authorize  # unified DAC+MAC+RBAC gate: authorize(user, op, path)
+# Import policy module
+from policy import authorize  # unified DAC+MAC+RBAC gate: authorize(user, op, path)
 
 
 # === SFTP v3 constants (only the ones we actually need) ===
@@ -110,6 +110,25 @@ def pack_attrs_from_stat(st: os.stat_result) -> bytes:
     attrs += pack_uint32(int(st.st_atime))
     attrs += pack_uint32(int(st.st_mtime))
     return attrs
+
+
+def get_sftp_path(jail_root: Path, full_path: Path) -> str:
+    """
+    Convert a full filesystem path back to an SFTP virtual path (relative to jail).
+    """
+    try:
+        # Resolve both to ensure we are comparing canonical paths
+        jail_root_resolved = jail_root.resolve()
+        full_path_resolved = full_path.resolve()
+        
+        rel = full_path_resolved.relative_to(jail_root_resolved)
+        p = str(rel).replace("\\", "/")
+        if p == ".":
+            return "/"
+        return "/" + p
+    except ValueError:
+        # Should not happen if safe_join was used correctly, but fallback to root
+        return "/"
 
 
 def safe_join(jail_root: Path, sftp_path: str) -> Path:
@@ -215,9 +234,11 @@ class SFTPServerSession(asyncssh.SSHServerSession):
     def connection_made(self, chan):
         # store channel so we can read/write later
         self._chan = chan
+        print(f"[SFTP] Connection made for user: {self._username}")
 
     def session_started(self):
         # kick off the SFTP loop (async)
+        print(f"[SFTP] Session started for user: {self._username}")
         self._loop_task = asyncio.create_task(self._sftp_loop())
 
     async def _sftp_loop(self):
@@ -267,6 +288,10 @@ class SFTPServerSession(asyncssh.SSHServerSession):
         except (asyncio.CancelledError, OSError):
             # not going to be fancy with errors here
             pass
+        except Exception as e:
+            print(f"[SFTP] Exception in _sftp_loop: {e}")
+            import traceback
+            traceback.print_exc()
         finally:
             # cleanup: close any still-open file handles
             for entry in list(self._handles._by_id.values()):
@@ -333,19 +358,14 @@ class SFTPServerSession(asyncssh.SSHServerSession):
             await self._send_status(request_id, SSH_FX_PERMISSION_DENIED, "path escapes jail")
             return
 
+        # produce a "nice" path relative to jail, but prefixed with "/"
+        canonical_sftp_path = get_sftp_path(self._jail_root, full_path)
+
         # call the unified gate so DAC/MAC/RBAC all get a say
-        allowed, reason = authorize(self._username, "realpath", str(full_path))
+        allowed, reason = authorize(self._username, "realpath", canonical_sftp_path, self._jail_root)
         if not allowed:
             await self._send_status(request_id, SSH_FX_PERMISSION_DENIED, reason)
             return
-
-        # produce a "nice" path relative to jail, but prefixed with "/"
-        jail_root = self._jail_root.resolve()
-        rel = full_path.resolve().relative_to(jail_root)
-        if str(rel) == ".":
-            canonical_sftp_path = "/"
-        else:
-            canonical_sftp_path = "/" + str(rel).replace("\\", "/")
 
         # NAME packet: [type][id][count][name][longname][attrs]
         payload = bytes([SSH_FXP_NAME])
@@ -385,7 +405,8 @@ class SFTPServerSession(asyncssh.SSHServerSession):
             return
 
         # generic "stat" op for auth
-        allowed, reason = authorize(self._username, "stat", str(full_path))
+        sftp_path = get_sftp_path(self._jail_root, full_path)
+        allowed, reason = authorize(self._username, "stat", sftp_path, self._jail_root)
         if not allowed:
             await self._send_status(request_id, SSH_FX_PERMISSION_DENIED, reason)
             return
@@ -427,7 +448,8 @@ class SFTPServerSession(asyncssh.SSHServerSession):
             return
 
         full_path = entry.path
-        allowed, reason = authorize(self._username, "stat", str(full_path))
+        sftp_path = get_sftp_path(self._jail_root, full_path)
+        allowed, reason = authorize(self._username, "stat", sftp_path, self._jail_root)
         if not allowed:
             await self._send_status(request_id, SSH_FX_PERMISSION_DENIED, reason)
             return
@@ -457,7 +479,8 @@ class SFTPServerSession(asyncssh.SSHServerSession):
             await self._send_status(request_id, SSH_FX_PERMISSION_DENIED, "path escapes jail")
             return
 
-        allowed, reason = authorize(self._username, "list", str(full_path))
+        sftp_path = get_sftp_path(self._jail_root, full_path)
+        allowed, reason = authorize(self._username, "list", sftp_path, self._jail_root)
         if not allowed:
             await self._send_status(request_id, SSH_FX_PERMISSION_DENIED, reason)
             return
@@ -491,7 +514,8 @@ class SFTPServerSession(asyncssh.SSHServerSession):
             await self._send_status(request_id, SSH_FX_PERMISSION_DENIED, "path escapes jail")
             return
 
-        allowed, reason = authorize(self._username, "mkdir", str(full_path))
+        sftp_path = get_sftp_path(self._jail_root, full_path)
+        allowed, reason = authorize(self._username, "mkdir", sftp_path, self._jail_root)
         if not allowed:
             await self._send_status(request_id, SSH_FX_PERMISSION_DENIED, reason)
             return
@@ -582,10 +606,11 @@ class SFTPServerSession(asyncssh.SSHServerSession):
             await self._send_status(request_id, SSH_FX_PERMISSION_DENIED, "path escapes jail")
             return
 
+        sftp_path = get_sftp_path(self._jail_root, full_path)
         if is_read:
-            allowed, reason = authorize(self._username, "read", str(full_path))
+            allowed, reason = authorize(self._username, "read", sftp_path, self._jail_root)
         else:
-            allowed, reason = authorize(self._username, "write", str(full_path))
+            allowed, reason = authorize(self._username, "write", sftp_path, self._jail_root)
         if not allowed:
             await self._send_status(request_id, SSH_FX_PERMISSION_DENIED, reason)
             return
@@ -661,7 +686,8 @@ class SFTPServerSession(asyncssh.SSHServerSession):
             return
 
         full_path = entry.path
-        allowed, reason = authorize(self._username, "read", str(full_path))
+        sftp_path = get_sftp_path(self._jail_root, full_path)
+        allowed, reason = authorize(self._username, "read", sftp_path, self._jail_root)
         if not allowed:
             await self._send_status(request_id, SSH_FX_PERMISSION_DENIED, reason)
             return
@@ -711,7 +737,8 @@ class SFTPServerSession(asyncssh.SSHServerSession):
         data = pkt[offset : offset + data_len]
 
         full_path = entry.path
-        allowed, reason = authorize(self._username, "write", str(full_path))
+        sftp_path = get_sftp_path(self._jail_root, full_path)
+        allowed, reason = authorize(self._username, "write", sftp_path, self._jail_root)
         if not allowed:
             await self._send_status(request_id, SSH_FX_PERMISSION_DENIED, reason)
             return
@@ -793,12 +820,64 @@ class SFTPSSHServer(asyncssh.SSHServer):
 
     def begin_auth(self, username):
         # we return True to say "yes, we want to do auth" (asyncssh handles details)
+        print(f"[Server] begin_auth called for user: {username}")
         return True
+    
+    def password_auth_supported(self):
+        """Enable password authentication."""
+        return True
+    
+    def validate_password(self, username, password):
+        """Validate user password against stored hashes."""
+        try:
+            print(f"[Server] validate_password called for user: {username}")
+            from auth import verify_password
+            from policy import get_user
+            
+            # Get user data
+            user_data = get_user(username)
+            if not user_data:
+                print(f"[Auth] User '{username}' not found")
+                return False
+            
+            # Verify password
+            result = verify_password(
+                password,
+                user_data['salt'],
+                user_data['password_hash'],
+                n=user_data.get('n', 16384),
+                r=user_data.get('r', 8),
+                p=user_data.get('p', 1),
+                dklen=user_data.get('dklen', 32)
+            )
+            
+            if result:
+                print(f"[Auth] User '{username}' authenticated successfully")
+            else:
+                print(f"[Auth] Authentication failed for user '{username}'")
+            
+            return result
+        except Exception as e:
+            print(f"[Auth] Exception during password validation: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
 
     def session_requested(self):
-        # we need the username from the connection object
-        username = self._conn.get_extra_info("username")
-        return SFTPServerSession(username=username, jail_root=self._jail_root)
+        # SFTP is handled via subsystem, not direct session
+        return True
+    
+    def subsystem_requested(self, subsystem):
+        """Handle SFTP subsystem requests."""
+        print(f"[Server] subsystem_requested: {subsystem}")
+        if subsystem == 'sftp':
+            return SFTPServerSession(username=self._conn.get_extra_info("username"),
+                                     jail_root=self._jail_root)
+        return False
+    
+    def server_requested(self, listen_host, listen_port):
+        """Handle server requests."""
+        return False
 
 
 async def start_server(host: str = "127.0.0.1", port: int = 2222):
@@ -807,9 +886,12 @@ async def start_server(host: str = "127.0.0.1", port: int = 2222):
 
     Before running this, you need to create a host key, e.g.:
 
-        ssh-keygen -t ed25519 -N '' -f server/ssh_host_ed25519_key
+        ssh-keygen -t ed25519 -N '' -f ssh_host_ed25519_key
     """
-    jail_root = Path(__file__).resolve().parent / "sftp_root"
+    server_dir = Path(__file__).resolve().parent
+    jail_root = server_dir / "sftp_root"
+    host_key_path = server_dir / "ssh_host_ed25519_key"
+    
     # just make sure jail root exists
     jail_root.mkdir(parents=True, exist_ok=True)
 
@@ -817,7 +899,7 @@ async def start_server(host: str = "127.0.0.1", port: int = 2222):
         lambda: SFTPSSHServer(jail_root=jail_root),
         host,
         port,
-        server_host_keys=["server/ssh_host_ed25519_key"],
+        server_host_keys=[str(host_key_path)],
         # actual password auth policy belongs somewhere else (auth.py / asyncssh config)
     )
 
@@ -826,14 +908,44 @@ async def start_server(host: str = "127.0.0.1", port: int = 2222):
 
 
 def main():
-    loop = asyncio.get_event_loop()
+    # Load policy data before starting server
+    from policy import load_policy_data
+    try:
+        load_policy_data()
+    except RuntimeError as e:
+        print(f"Fatal error loading policy data: {e}")
+        return
+    
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    # Set up exception handler for the event loop
+    def exception_handler(loop, context):
+        exception = context.get('exception')
+        message = context.get('message', 'Unknown error')
+        print(f"[EventLoop] Exception: {message}")
+        if exception:
+            print(f"[EventLoop] {type(exception).__name__}: {exception}")
+            import traceback
+            traceback.print_exception(type(exception), exception, exception.__traceback__)
+    
+    loop.set_exception_handler(exception_handler)
+    
     try:
         server = loop.run_until_complete(start_server())
+        print("Server started, entering run_forever loop...")
         loop.run_forever()
+        print("run_forever returned!?")
     except (OSError, asyncssh.Error) as exc:
         print("Error starting server:", exc)
+        import traceback
+        traceback.print_exc()
     except KeyboardInterrupt:
         pass
+    except Exception as e:
+        print(f"Unexpected error: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 if __name__ == "__main__":

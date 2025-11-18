@@ -21,7 +21,7 @@ class SFTPClient:
                 username=self.username,
                 password=self.password,
                 known_hosts=None,
-                server_host_key_algs=['ssh-rsa', 'rsa-sha2-256', 'rsa-sha2-512']
+                server_host_key_algs=['ssh-ed25519', 'ssh-rsa', 'rsa-sha2-256', 'rsa-sha2-512']
             )
             self.sftp = await self.conn.start_sftp_client()
             print(f"Connected to {self.host}:{self.port} as {self.username}")

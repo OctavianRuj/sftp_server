@@ -7,6 +7,11 @@ import tempfile
 import pytest
 
 from server import server as s
+from server.policy import load_policy_data
+
+@pytest.fixture(scope="module", autouse=True)
+def setup_policy():
+    load_policy_data()
 
 # Helpers to build SFTP packets for the server handlers
 
