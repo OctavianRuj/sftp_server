@@ -260,16 +260,21 @@ class SFTPServerSession(asyncssh.SSHServerSession):
         Reads packets, checks the type, and calls the right handler.
         Also does the INIT→VERSION exchange.
         """
+        print(f"[SFTP] Starting _sftp_loop for {self._username}")
         try:
             while True:
+                print(f"[SFTP] Waiting for packet...")
                 pkt = await self._read_packet()
                 if pkt is None:
                     # channel closed or EOF
+                    print(f"[SFTP] Packet is None, exiting loop")
                     break
 
                 msg_type = pkt[0]
+                print(f"[SFTP] Received packet type: {msg_type}")
 
                 if msg_type == SSH_FXP_INIT:
+                    print(f"[SFTP] Handling INIT")
                     await self._handle_init(pkt)
                     # then we keep processing stuff
                 elif msg_type == SSH_FXP_REALPATH:
