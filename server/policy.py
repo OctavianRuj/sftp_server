@@ -1,264 +1,199 @@
-"""Unified authorization gate implementing DAC, MAC, and RBAC (Persons 6 & 7).
-
-This module composes three access control models:
-- DAC (Discretionary Access Control): owner/group/other with Unix-style modes.
-- MAC (Mandatory Access Control): label-based with "no read up" and "no write down".
-- RBAC (Role-Based Access Control): roles grant operations on path prefixes.
-
-Final decision: DAC ∧ MAC ∧ RBAC (all must allow; deny overrides).
-
-Composition rule:
-- If any model denies, the final decision is deny.
-- All audit decisions are written to server/audit.jsonl with timezone-aware timestamps.
-
-Data files required at startup:
-- data/user_roles.json (RBAC): user -> [roles]
-- data/role_perms.csv (RBAC): role, prefix, permission (read/write/mkdir/...)
-- data/mac_labels.json (MAC): paths and user clearances
-- data/dac_owners.csv (DAC): path_prefix, owner, group, mode (optional; defaults to restrictive)
-"""
-
-from __future__ import annotations
-
-import csv
 import json
-from datetime import datetime, timezone
+import csv
+import os
+import logging
+import time
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
 
+logger = logging.getLogger(__name__)
 
-ROOT = Path(__file__).resolve().parent.parent
-DATA_DIR = ROOT / "data"
-AUDIT_PATH = Path(__file__).resolve().parent / "audit.jsonl"
+class PolicyManager:
+    def __init__(self, data_dir, audit_file):
+        self.data_dir = data_dir
+        self.audit_file = audit_file
+        self.user_roles = {}
+        self.role_perms = []
+        self.mac_labels = {}
+        self.dac_owners = []
+        self.load_policies()
 
-# Label ordering for MAC
-LABEL_ORDER: Dict[str, int] = {"public": 0, "internal": 1, "confidential": 2}
-
-# Cached policy data (loaded once at module import)
-_USER_ROLES: Dict[str, List[str]] = {}
-_ROLE_PERMS: List[Dict[str, str]] = []
-_DAC_POLICIES: List[Dict] = []
-_MAC_PATHS: Dict[str, str] = {}
-_MAC_USERS: Dict[str, str] = {}
-_POLICIES_LOADED = False
-
-
-def _audit_record(user: str, op: str, path: str, allowed: bool, reason: str) -> None:
-    """Write an audit record to audit.jsonl with all required fields."""
-    rec = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "user": user,
-        "op": op,
-        "path": path,
-        "allowed": bool(allowed),
-        "reason": reason,
-    }
-    try:
-        with AUDIT_PATH.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(rec) + "\n")
-    except Exception:
-        # Do not let audit failures block operations
-        pass
-
-
-def _load_policies() -> None:
-    """Load all policy files (DAC, MAC, RBAC) at startup. Raise on critical failures."""
-    global _USER_ROLES, _ROLE_PERMS, _DAC_POLICIES, _MAC_PATHS, _MAC_USERS, _POLICIES_LOADED
-
-    # Load RBAC: user_roles.json
-    ur_path = DATA_DIR / "user_roles.json"
-    if not ur_path.exists():
-        raise FileNotFoundError(f"[Policy] user_roles.json missing at {ur_path}")
-    with open(ur_path, "r", encoding="utf-8") as f:
-        _USER_ROLES = json.load(f)
-    print(f"[Policy] Loaded roles for {len(_USER_ROLES)} users from {ur_path}")
-
-    # Load RBAC: role_perms.csv
-    rp_path = DATA_DIR / "role_perms.csv"
-    if not rp_path.exists():
-        raise FileNotFoundError(f"[Policy] role_perms.csv missing at {rp_path}")
-    with open(rp_path, "r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        _ROLE_PERMS = [row for row in reader]
-    print(f"[Policy] Loaded {len(_ROLE_PERMS)} RBAC rules from {rp_path}")
-
-    # Load DAC: dac_owners.csv (optional but recommended)
-    dac_path = DATA_DIR / "dac_owners.csv"
-    if dac_path.exists():
-        with open(dac_path, "r", encoding="utf-8") as f:
+    def load_policies(self):
+        # Load User Roles
+        with open(os.path.join(self.data_dir, 'user_roles.json'), 'r') as f:
+            self.user_roles = json.load(f)
+        
+        # Load Role Perms
+        with open(os.path.join(self.data_dir, 'role_perms.csv'), 'r') as f:
             reader = csv.DictReader(f)
-            for row in reader:
-                _DAC_POLICIES.append({
-                    "prefix": row["path_prefix"].strip(),
-                    "owner": row["owner"].strip(),
-                    "group": row["group"].strip(),
-                    "mode": int(row["mode"].strip(), 8)
-                })
-        _DAC_POLICIES.sort(key=lambda x: len(x["prefix"]), reverse=True)
-        print(f"[Policy] Loaded {len(_DAC_POLICIES)} DAC ownership rules from {dac_path}")
-    else:
-        print(f"[Policy] Warning: {dac_path} not found; DAC will default to restrictive mode")
+            self.role_perms = list(reader)
+            
+        # Load MAC Labels
+        with open(os.path.join(self.data_dir, 'mac_labels.json'), 'r') as f:
+            self.mac_labels = json.load(f)
+            
+        # Load DAC Owners
+        with open(os.path.join(self.data_dir, 'dac_owners.csv'), 'r') as f:
+            reader = csv.DictReader(f)
+            self.dac_owners = list(reader)
 
-    # Load MAC: mac_labels.json
-    mac_path = DATA_DIR / "mac_labels.json"
-    if not mac_path.exists():
-        raise FileNotFoundError(f"[Policy] mac_labels.json missing at {mac_path}")
-    with open(mac_path, "r", encoding="utf-8") as f:
-        mac_data = json.load(f)
-    _MAC_PATHS = mac_data.get("paths", {})
-    _MAC_USERS = mac_data.get("users", {})
-    print(f"[Policy] Loaded MAC labels for {len(_MAC_USERS)} users from {mac_path}")
+        logger.info("Policies loaded successfully.")
 
-    _POLICIES_LOADED = True
-    print("[Policy] All policies loaded successfully")
+    def audit(self, user, op, path, allowed, reason):
+        record = {
+            'timestamp': time.time(),
+            'user': user,
+            'op': op,
+            'path': path,
+            'allowed': allowed,
+            'reason': reason
+        }
+        with open(self.audit_file, 'a') as f:
+            f.write(json.dumps(record) + '\n')
 
+    def authorize(self, user, op, path):
+        # Default deny
+        allowed = False
+        reason = "Default deny"
 
-def _get_label_for_path(path: str) -> str:
-    """Return the MAC label for a path (longest-prefix match, default 'public')."""
-    p_norm = path if path.startswith("/") else "/" + path
-    best_label = "public"
-    best_len = -1
-    for prefix, label in _MAC_PATHS.items():
-        pref = prefix if prefix.startswith("/") else "/" + prefix
-        if p_norm.startswith(pref) and len(pref) > best_len:
-            best_len = len(pref)
-            best_label = label
-    return best_label
+        # 1. DAC Check (Simplified for now, assumes path ownership/mode logic)
+        # In a real implementation, we'd check the actual file mode. 
+        # Here we check against our loaded DAC config for the path prefix.
+        dac_allowed = self._check_dac(user, op, path)
+        
+        # 2. MAC Check
+        mac_allowed = self._check_mac(user, op, path)
+        
+        # 3. RBAC Check
+        rbac_allowed = self._check_rbac(user, op, path)
 
+        # Composition Rule: DAC AND MAC AND RBAC
+        if dac_allowed and mac_allowed and rbac_allowed:
+            allowed = True
+            reason = "Allowed by DAC, MAC, and RBAC"
+        else:
+            allowed = False
+            reasons = []
+            if not dac_allowed: reasons.append("DAC denied")
+            if not mac_allowed: reasons.append("MAC denied")
+            if not rbac_allowed: reasons.append("RBAC denied")
+            reason = "; ".join(reasons)
 
-def _check_dac(user: str, op: str, path: str) -> Tuple[bool, str]:
-    """Check DAC: owner/group/other mode bits.
-    
-    If no explicit DAC policy is defined (dac_owners.csv missing or no match),
-    allow access by default (permissive mode).
-    """
-    if not _DAC_POLICIES:
-        # No DAC policies defined; allow by default
-        return True, "dac-no-policies(allowed-by-default)"
+        self.audit(user, op, path, allowed, reason)
+        return allowed, reason
 
-    policy = None
-    for p in _DAC_POLICIES:
-        if path.startswith(p["prefix"]):
-            policy = p
-            break
+    def _check_dac(self, user, op, path):
+        # Simplified DAC: Check if user owns the path or has group access
+        # This is a placeholder. Real DAC requires checking file stats.
+        # For this stage, we'll use the dac_owners.csv to simulate ownership.
+        
+        # Find best matching prefix
+        best_match = None
+        for entry in self.dac_owners:
+            if path.startswith(entry['path_prefix']):
+                if best_match is None or len(entry['path_prefix']) > len(best_match['path_prefix']):
+                    best_match = entry
+        
+        if not best_match:
+            # Default to root ownership if no match? Or deny?
+            # Let's say if no match, it's owned by root/root 755
+            owner = 'root'
+            group = 'root'
+            mode = 0o755
+        else:
+            owner = best_match['owner']
+            group = best_match['group']
+            mode = int(best_match['mode'], 8)
 
-    if not policy:
-        # No matching policy; allow by default
-        return True, "dac-no-match(allowed-by-default)"
+        # Check permissions
+        # Owner
+        if user == owner:
+            return self._check_mode(mode >> 6, op)
+        # Group (assume everyone in 'users' group for simplicity unless specified)
+        # We need a user-group map. Let's assume a simple one or just check 'users'
+        # For now, let's say if group is 'users', everyone has access.
+        if group == 'users': 
+             return self._check_mode((mode >> 3) & 7, op)
+        
+        # Other
+        return self._check_mode(mode & 7, op)
 
-    owner = policy["owner"]
-    mode = policy["mode"]
+    def _check_mode(self, mode_bits, op):
+        # mode_bits is 3 bits: r w x
+        # op mapping:
+        # read/list/stat -> r (4)
+        # write/create/remove -> w (2)
+        # execute/traverse -> x (1)
+        
+        if op in ['read', 'list', 'stat', 'opendir', 'readdir']:
+            return (mode_bits & 4) != 0
+        if op in ['write', 'create', 'remove', 'mkdir', 'rmdir', 'put']:
+            return (mode_bits & 2) != 0
+        return False # Unknown op
 
-    # Map operation to required bit (4=read, 2=write, 1=execute)
-    req_bit = 0
-    if op in ["read", "list", "stat", "realpath", "lstat", "fstat"]:
-        req_bit = 4  # read
-    elif op in ["write", "mkdir", "remove", "create", "rename"]:
-        req_bit = 2  # write
+    def _check_mac(self, user, op, path):
+        # No read up, no write down
+        # Levels: public < internal < confidential
+        levels = {'public': 0, 'internal': 1, 'confidential': 2}
+        
+        user_label = self.mac_labels['users'].get(user, 'public')
+        user_level = levels.get(user_label, 0)
+        
+        # Find resource label
+        resource_label = 'public' # Default
+        for prefix, label in self.mac_labels['paths'].items():
+            if path.startswith(prefix):
+                resource_label = label
+                # Keep looking for more specific match? 
+                # The dict order isn't guaranteed, so we should find longest prefix match
+                # But for now let's assume the order in json or simple logic
+                pass
+        
+        # Better longest prefix match for resource label
+        best_prefix_len = -1
+        for prefix, label in self.mac_labels['paths'].items():
+            if path.startswith(prefix) and len(prefix) > best_prefix_len:
+                resource_label = label
+                best_prefix_len = len(prefix)
 
-    # Determine effective mode bits
-    if user == owner:
-        effective_bits = (mode >> 6) & 7
-    else:
-        effective_bits = mode & 7  # other bits
+        resource_level = levels.get(resource_label, 0)
 
-    if (effective_bits & req_bit) == req_bit:
-        return True, f"dac-allowed(user={user},owner={owner},mode={oct(mode)})"
-    else:
-        return False, f"dac-denied(user={user},owner={owner},mode={oct(mode)},need={oct(req_bit)})"
+        if op in ['read', 'list', 'stat', 'opendir', 'readdir', 'get']:
+            # Read: User level >= Resource level (No read up)
+            # Actually "No read up" means you can't read HIGHER level.
+            # So User Level MUST BE >= Resource Level.
+            # e.g. Confidential user (2) can read Public (0) -> 2 >= 0 OK.
+            # Public user (0) can read Confidential (2) -> 0 >= 2 FALSE.
+            return user_level >= resource_level
+        
+        if op in ['write', 'create', 'remove', 'mkdir', 'rmdir', 'put']:
+            # Write: User level <= Resource level (No write down)
+            # e.g. Confidential user (2) can write Public (0) -> 2 <= 0 FALSE.
+            # Public user (0) can write Confidential (2) -> 0 <= 2 OK.
+            return user_level <= resource_level
+            
+        return False
 
+    def _check_rbac(self, user, op, path):
+        roles = self.user_roles.get(user, [])
+        
+        # Check if ANY role allows the operation
+        for role in roles:
+            for perm in self.role_perms:
+                if perm['role'] == role:
+                    # Check prefix match
+                    if path.startswith(perm['prefix']):
+                        # Check op permission
+                        if self._check_rbac_perm(perm, op):
+                            return True
+        return False
 
-def _check_mac(user: str, op: str, path: str) -> Tuple[bool, str]:
-    """Check MAC: no read up, no write down."""
-    user_label = _MAC_USERS.get(user, "public")
-    resource_label = _get_label_for_path(path)
-
-    user_rank = LABEL_ORDER.get(user_label, 0)
-    res_rank = LABEL_ORDER.get(resource_label, 0)
-
-    if op in ("read", "list", "stat", "realpath", "lstat", "fstat"):
-        # No read up: user clearance >= resource label
-        if user_rank < res_rank:
-            return False, f"mac-read-up-denied(user={user_label}<resource={resource_label})"
-    elif op in ("write", "mkdir", "create", "remove"):
-        # No write down: user clearance <= resource label
-        if user_rank > res_rank:
-            return False, f"mac-write-down-denied(user={user_label}>resource={resource_label})"
-
-    return True, f"mac-ok(user={user_label},resource={resource_label})"
-
-
-def _check_rbac(user: str, op: str, path: str) -> Tuple[bool, str]:
-    """Check RBAC: user roles grant operations on resources.
-    
-    CSV format: role,resource,read,write,delete
-    If no RBAC policies are defined, allow by default (permissive mode).
-    """
-    if not _ROLE_PERMS:
-        # No RBAC rules defined; allow by default
-        return True, "rbac-no-policies(allowed-by-default)"
-
-    roles = _USER_ROLES.get(user, [])
-    if not roles:
-        # User has no roles; allow by default if no RBAC rules constrain them
-        return True, "rbac-no-user-roles(allowed-by-default)"
-
-    # Extract resource name from path (basename)
-    resource = Path(path).name if path != "/" else "/"
-
-    for role in roles:
-        for rule in _ROLE_PERMS:
-            if rule.get("role") != role:
-                continue
-
-            rule_resource = rule.get("resource", "").strip()
-            if rule_resource != resource:
-                continue
-
-            # Map operation to CSV permission column
-            perm_col = None
-            if op in ["read", "list", "stat", "realpath", "lstat", "fstat"]:
-                perm_col = "read"
-            elif op in ["write", "create", "mkdir"]:
-                perm_col = "write"
-            elif op in ["remove", "delete"]:
-                perm_col = "delete"
-
-            if perm_col and rule.get(perm_col, "").strip():
-                return True, f"rbac-allowed(role={role},resource={rule_resource},perm={perm_col})"
-
-    # User has roles but none grant access to this resource/operation
-    return True, "rbac-no-matching-rules(allowed-by-default)"
-
-
-def authorize(user: str, op: str, path: str) -> Tuple[bool, str]:
-    """Unified authorization gate: DAC ∧ MAC ∧ RBAC.
-
-    Returns (allowed: bool, reason: str). Always audits the decision.
-    Composition rule: all three must allow; if any denies, final is deny.
-    """
-    # Ensure policies are loaded
-    if not _POLICIES_LOADED:
-        try:
-            _load_policies()
-        except Exception as e:
-            reason = f"policy-load-error: {e}"
-            _audit_record(user, op, path, False, reason)
-            return False, reason
-
-    # Normalize path
-    path_str = str(path)
-    if not path_str.startswith("/"):
-        path_str = "/" + path_str
-
-    # Check all three models
-    dac_ok, dac_reason = _check_dac(user, op, path_str)
-    mac_ok, mac_reason = _check_mac(user, op, path_str)
-    rbac_ok, rbac_reason = _check_rbac(user, op, path_str)
-
-    # Composition: DAC ∧ MAC ∧ RBAC (all must allow)
-    final_allow = dac_ok and mac_ok and rbac_ok
-    reason = f"DAC({dac_reason})|MAC({mac_reason})|RBAC({rbac_reason})"
-
-    _audit_record(user, op, path_str, final_allow, reason)
-    return final_allow, reason
+    def _check_rbac_perm(self, perm, op):
+        # Map op to column
+        # read, write, delete, mkdir, list, stat
+        if op in ['read', 'get', 'open']: return perm['read'] == '1'
+        if op in ['write', 'put', 'create']: return perm['write'] == '1'
+        if op in ['delete', 'remove', 'rmdir']: return perm['delete'] == '1'
+        if op in ['mkdir']: return perm['mkdir'] == '1'
+        if op in ['list', 'opendir', 'readdir']: return perm['list'] == '1'
+        if op in ['stat', 'lstat', 'fstat']: return perm['stat'] == '1'
+        return False

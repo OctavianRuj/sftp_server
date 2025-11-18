@@ -1,12 +1,12 @@
 {
-	"paths": {
-		"/projects/confidential": "confidential",
-		"/projects/internal": "internal",
-		"/": "public"
-	},
-	"users": {
-		"alice": "confidential",
-		"bob": "internal",
-		"eve": "public"
-	}
+  "users": {
+    "alice": "confidential",
+    "bob": "internal",
+    "eve": "public"
+  },
+  "paths": {
+    "/public": "public",
+    "/internal": "internal",
+    "/confidential": "confidential"
+  }
 }

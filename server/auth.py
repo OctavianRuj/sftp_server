@@ -1,72 +1,38 @@
-# authenticate.py
-import base64
+import json
 import hashlib
-import secrets
-from typing import Optional
+import base64
+import os
+import logging
 
-# Default scrypt parameters (these should match the ones used when the hashes
-# in users.json were generated)
-SCRYPT_N = 16384
-SCRYPT_R = 8
-SCRYPT_P = 1
-DKLEN = 32
+logger = logging.getLogger(__name__)
 
+class AuthManager:
+    def __init__(self, users_file):
+        self.users_file = users_file
+        self.users = {}
+        self.load_users()
 
-def scrypt_hash(
-    password: str,
-    salt: bytes,
-    n: int = SCRYPT_N,
-    r: int = SCRYPT_R,
-    p: int = SCRYPT_P,
-    dklen: int = DKLEN,
-) -> bytes:
-    """
-    Compute the scrypt hash for a given password and salt.
+    def load_users(self):
+        try:
+            with open(self.users_file, 'r') as f:
+                users_list = json.load(f)
+                for user in users_list:
+                    self.users[user['username']] = user
+            logger.info(f"Loaded {len(self.users)} users from {self.users_file}")
+        except Exception as e:
+            logger.error(f"Failed to load users from {self.users_file}: {e}")
+            raise
 
-    Returns the raw hash as bytes.
-    """
-    return hashlib.scrypt(
-        password.encode("utf-8"),  # string -> bytes using UTF-8
-        salt=salt,
-        n=n,
-        r=r,
-        p=p,
-        dklen=dklen,
-    )
-
-
-def verify_password(
-    input_pw: str,
-    stored_salt_b64: str,
-    stored_hash_b64: str,
-    n: int = SCRYPT_N,
-    r: int = SCRYPT_R,
-    p: int = SCRYPT_P,
-    dklen: int = DKLEN,
-) -> bool:
-    """
-    Return True iff input_pw matches the stored hash.
-
-    - stored_salt_b64 and stored_hash_b64 are base64-encoded strings.
-    - Uses constant-time comparison via secrets.compare_digest.
-    """
-    try:
-        # 1. Decode base64-encoded salt and hash into raw bytes
-        salt = base64.b64decode(stored_salt_b64)
-        stored_hash = base64.b64decode(stored_hash_b64)
-    except (TypeError, ValueError):
-        # Malformed base64 input → treat as invalid credentials
-        return False
-
-    # 2. Compute scrypt hash of the input password with the same parameters
-    computed_hash = scrypt_hash(
-        input_pw,
-        salt,
-        n=n,
-        r=r,
-        p=p,
-        dklen=dklen,
-    )
-
-    # 3. Compare in constant time to avoid timing attacks
-    return secrets.compare_digest(computed_hash, stored_hash)
+    def verify_password(self, username, password):
+        if username not in self.users:
+            return False
+        
+        user = self.users[username]
+        salt = base64.b64decode(user['salt'])
+        stored_hash = user['password_hash']
+        
+        # In a real app, check 'algo' field. Here we assume pbkdf2_sha256 as per setup_data.py
+        dk = hashlib.pbkdf2_hmac('sha256', password.encode(), salt, 100000)
+        computed_hash = base64.b64encode(dk).decode()
+        
+        return computed_hash == stored_hash

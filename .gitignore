@@ -1,16 +1,48 @@
-# Python cache
+# Python
 __pycache__/
-*.pyc
-.pytest_cache/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
 
-# Virtual environment
-.venv/
+# Virtual environments
+venv/
+ENV/
+env/
+.venv
 
-# macOS files
-.DS_Store
-
-# VS Code
+# IDE
 .vscode/
+.idea/
+*.swp
+*.swo
+*~
 
 # Logs
 *.log
+*.jsonl
+audit.jsonl
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Project specific
+server/sftp_root/*
+!server/sftp_root/.gitkeep

@@ -1,0 +1,5 @@
+path_prefix,owner,group,mode
+/home/bob,bob,users,700
+/public,alice,users,755
+/internal,alice,admins,770
+/confidential,alice,admins,700
